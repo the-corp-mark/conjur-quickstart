@@ -1,0 +1,248 @@
+#==============================================================================
+# JWT AUTHENTICATION POLICY FOR CONJUR
+#==============================================================================
+#
+# CONJUR CONCEPTS GLOSSARY:
+# -------------------------
+# Conjur Concept    | Real-World Analogy           | What It Does
+# ------------------|------------------------------|--------------------------------
+# !policy           | Folder/Namespace             | Organizes resources
+# !host             | Service Account              | NON-HUMAN identity (app/service)
+# !user             | User Account                 | HUMAN identity (person)
+# !variable         | Secret/Password              | Stores sensitive data
+# !group            | Active Directory Group       | Collection of users/hosts
+# !webservice       | API Endpoint                 | Service accessible via HTTP
+# !permit           | chmod/Access Control Entry   | Grants privileges on resource
+# !grant            | "Add user to group"          | Adds member to group/role
+# annotations       | Tags/Labels                  | Metadata for constraints
+#
+# This policy creates a complete JWT authentication setup with 3 main parts:
+#
+#   1. JWT Authenticator Service  (conjur/authn-jwt/demo)
+#   2. Application Identity       (host/secure-app)
+#   3. Secret Access              (jwt-app/db-password)
+#
+# POLICY STRUCTURE TREE:
+# ───────────────────────
+# root/
+#  ├── host/secure-app                    ← Application identity (global scope)
+#  │    └─ Will authenticate via JWT claim "app-id=secure-app" (if configured)
+#  │
+#  ├── policy/conjur/authn-jwt/demo/      ← JWT Authenticator service
+#  │    ├── webservice                    ← Authentication endpoint
+#  │    ├── variable/jwks-uri             ← Where to fetch JWT public keys
+#  │    ├── variable/issuer               ← Expected JWT issuer claim
+#  │    ├── variable/token-app-property   ← JWT claim name for identity (e.g., "app-id")
+#  │    ├── variable/enforced-claims      ← Required JWT claims (e.g., "environment,team")
+#  │    ├── group/apps                    ← Apps allowed to use this authenticator
+#  │    ├── group/operators               ← Users who can check authenticator status
+#  │    └── webservice status             ← Status check endpoint
+#  │
+#  └── policy/jwt-app/                    ← Application secrets folder
+#       └── variable/db-password          ← Secret this app can access
+#
+# AUTHENTICATION FLOW:
+#
+#   1. JWT Provider issues token with claim: {"app-id": "secure-app", ...}
+#   2. Client sends JWT to: POST /authn-jwt/demo/{account}/authenticate
+#   3. Conjur validates JWT using public keys from jwks-uri
+#   4. Conjur maps "app-id" claim to host/secure-app (1:1 mapping via token-app-property)
+#   5. Client receives Conjur auth token
+#   6. Client retrieves secrets using auth token
+#
+# WHAT IS A HOST IN THIS EXAMPLE?
+# --------------------------------
+# In Conjur, a !host is a NON-HUMAN IDENTITY - think "service account" for applications.
+#
+# Real-world examples of hosts:
+#   - A microservice running in Kubernetes
+#   - A CI/CD pipeline (Jenkins, GitLab CI, GitHub Actions)
+#   - A serverless function (AWS Lambda)
+#   - A container or VM
+#   - An API gateway
+#
+# In THIS example:
+#   - "secure-app" is a !host representing an application/service
+#   - The JWT identifies the application (via "app-id" claim)
+#   - Conjur authenticates the host and grants access to secrets
+#   - The host can then retrieve the db-password secret
+#
+# Contrast with !user (human identity):
+#   - !user "admin" = A person who manages Conjur
+#   - !host "secure-app" = An application that uses Conjur secrets
+#
+# POLICY NAMING: WHY "conjur/authn-jwt/demo"?
+# ─────────────────────────────────────────────
+# The "conjur/" prefix is a CONVENTION, not a requirement:
+#
+#   1. BUILT-IN vs CUSTOM: "conjur/" signals this is Conjur built-in infrastructure
+#      - "conjur/authn-jwt/demo" = Built-in authenticator
+#      - "myapp/secrets" = Custom application policy
+#
+#   2. EXPECTED LOCATION: Operators trained on Conjur look for authenticators here
+#      - This is the standard practice in Conjur documentation and examples
+#      - New team members expect to find authenticators under "conjur/"
+#
+#   3. ORGANIZATIONAL CLARITY: Helps categorize resources at a glance
+#      - "conjur/" = System/infrastructure policies
+#      - Everything else = Application-specific policies
+#
+#   4. CONSISTENCY: Following the same naming as the Conjur community
+#      - Reduces confusion when sharing code across teams
+#      - Matches examples in official Conjur docs
+#
+# NOTE: Technically, you could name it "bob/authn-jwt/demo" and it would work,
+# but using "conjur/" follows best practices and reduces onboarding friction.
+#
+# IMPORTANT: WEBSERVICE NAMES IN AUTHENTICATORS
+# ──────────────────────────────────────────────
+# For normal policies, webservice names are just labels (you could use any name).
+# However, for AUTHENTICATORS, Conjur's engine is hard-coded to expect specific names:
+#
+#   - Unnamed !webservice  → Maps to /authenticate endpoint
+#   - !webservice status   → Maps to /status endpoint
+#
+# If you rename these (e.g., !webservice login or !webservice health), the standard
+# Conjur API paths will NOT work because Conjur won't find resources with those IDs
+# to authorize against.
+#
+# TL;DR: Don't rename the webservices in authenticators unless you know what you're doing!
+#
+#==============================================================================
+
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ PART 1: JWT AUTHENTICATOR SERVICE                                       │
+# │ Creates the authentication service and configuration variables          │
+# └─────────────────────────────────────────────────────────────────────────┘
+
+- !policy                           # CONJUR: Namespace/container for resources
+  id: conjur/authn-jwt/demo
+  body:
+    # CONJUR: !webservice = API endpoint
+    # The authentication webservice endpoint (UNNAMED - required for authenticators)
+    # NOTE: For authenticators, the unnamed webservice is hard-coded to /authenticate
+    # If you rename this, the standard Conjur API path will NOT work!
+    # Accessible at: POST /authn-jwt/demo/{account}/authenticate
+    - !webservice
+
+    # CONJUR: !variable = Secret value (configuration in this case)
+    # REQUIRED: Where Conjur fetches JWT public keys for signature validation
+    # Example value: "http://jwt-provider:8000/.well-known/jwks.json"
+    - !variable jwks-uri
+
+    # CONJUR: !variable = Configuration secret
+    # Maps JWT claim to Conjur host identity
+    # Example: if set to "app-id", a JWT with {"app-id": "secure-app"}
+    # will authenticate as host/secure-app
+    - !variable token-app-property
+
+    # CONJUR: !variable = Configuration secret
+    # Expected JWT issuer (must match JWT's "iss" claim)
+    # Example value: "demo-jwt-provider"
+    - !variable issuer
+
+    # CONJUR: !variable = Configuration secret
+    # Comma-separated list of required JWT claims
+    # Example value: "environment,team"
+    - !variable enforced-claims
+
+    # CONJUR: !group = Collection of roles (hosts/users)
+    # Applications allowed to authenticate via JWT
+    - !group apps
+
+    # CONJUR: !permit = Grants privileges on a resource
+    # Permission: Apps group members can authenticate using this service
+    - !permit
+      role: !group apps              # WHO: Members of the apps group
+      privileges: [ read, authenticate ]  # WHAT: Can read and authenticate
+      resource: !webservice          # WHERE: On the webservice endpoint
+
+    # CONJUR: !webservice = API endpoint
+    # The status check webservice endpoint (NAMED "status" - required for authenticators)
+    # NOTE: For authenticators, the "status" webservice is hard-coded to /status
+    # If you rename this to "health" or anything else, the standard Conjur API path will NOT work!
+    # Accessible at: GET /authn-jwt/demo/{account}/status
+    - !webservice status
+
+    # CONJUR: !group = Collection of roles
+    # Users who can check authenticator health status
+    - !group operators
+
+    # CONJUR: !permit = Grants privileges on a resource
+    # Permission: Operators can check authenticator status
+    - !permit
+      role: !group operators         # WHO: Members of operators group
+      privilege: [ read ]            # WHAT: Can read status
+      resource: !webservice status   # WHERE: On the status endpoint
+
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ PART 2: APPLICATION IDENTITY AND SECRETS                                │
+# │ Defines the application that will authenticate using JWT                │
+# └─────────────────────────────────────────────────────────────────────────┘
+
+# CONJUR: !host = NON-HUMAN IDENTITY (application, service, machine)
+# Note: Defined at the top level here, so it becomes a "Global Identity"
+# exactly like 'Dave@BotApp'.
+#
+# Host identity: Maps to JWT claim {"app-id": "secure-app"}
+# When token-app-property is set to "app-id", a JWT with "app-id=secure-app"
+# will authenticate as this host (direct 1:1 mapping)
+#
+# CONJUR: annotations = Key-value metadata for enforcing constraints
+- !host
+  id: secure-app                    # Application/service identifier
+  annotations:                      # Required JWT claim values:
+    # NOTE ON ANNOTATIONS:
+    # Although the policy is defined as 'conjur/authn-jwt/demo', the
+    # annotations omit the 'conjur/' prefix. This is because the
+    # Authenticator engine internally identifies itself by the
+    # [Type]/[Service-ID] pattern (authn-jwt/demo) when looking up
+    # host-specific claim constraints.
+    authn-jwt/demo/environment: production   # JWT must have environment=production
+    authn-jwt/demo/team: platform            # JWT must have team=platform
+
+# CONJUR: !policy = Namespace/container for organizing resources
+# Policy for application secrets
+- !policy
+  id: jwt-app
+  body:
+    # CONJUR: !variable = SECRET value
+    # Secret: Database password accessible by the authenticated app
+    - !variable db-password
+
+    # CONJUR: !permit = Grants privileges on a resource
+    # Permission: The global secure-app host can read and execute the db-password variable
+    - !permit
+      role: !host /secure-app       # WHO: The global host (note the '/' root-level prefix)
+      privileges: [ read, execute ] # WHAT: 'execute' is REQUIRED to fetch the secret value via API
+      resource: !variable db-password  # WHERE: On the db-password variable
+
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ PART 3: ACCESS GRANTS                                                   │
+# │ Connects the application identity to the JWT authenticator              │
+# └─────────────────────────────────────────────────────────────────────────┘
+
+# CONJUR: !grant = Adds a member to a group/role
+# Grant: Allow secure-app host to use the JWT authenticator
+- !grant
+  role: !group conjur/authn-jwt/demo/apps  # THE GROUP: Apps allowed to use JWT auth
+  member: !host secure-app                  # THE MEMBER: Our global secure-app host
+
+# CONJUR: !grant = Adds a member to a group/role
+# Grant: Allow admin user to check JWT authenticator status
+- !grant
+  role: !group conjur/authn-jwt/demo/operators  # THE GROUP: Users who can check status
+  member: !user admin                            # THE MEMBER: The admin user
+
+#==============================================================================
+# END OF POLICY
+#==============================================================================
+#
+# TO VIEW THE ACTUAL LOADED POLICY STRUCTURE:
+# Run this command to see all resources created by this policy:
+#
+#   docker-compose exec client conjur list | jq -r '.[]' | awk -F: '{print $3 " (" $2 ")"}' | sed 's/\// │── /g' | sort
+#
+# This displays the resource hierarchy as it appears in Conjur after loading,
+# with resource types shown in parentheses (e.g., "secure-app (host)").
+#==============================================================================
