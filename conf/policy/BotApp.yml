@@ -1,17 +1,63 @@
+#==============================================================================
+# BOT APPLICATION POLICY FOR CONJUR (UPDATED)
+#==============================================================================
+#
+# CONJUR CONCEPTS GLOSSARY:
+# -------------------------
+# Conjur Concept    | Real-World Analogy           | What It Does
+# ------------------|------------------------------|--------------------------------
+# !policy           | Folder/Namespace             | Organizes resources
+# !host             | Service Account              | NON-HUMAN identity (app/service)
+# !user             | User Account                 | HUMAN identity (person)
+# !variable         | Secret/Password              | Stores sensitive data
+# !permit           | chmod/Access Control Entry   | Grants privileges on resource
+#
+# TREE STRUCTURE AFTER LOADING TO ROOT:
+# -------------------------------------
+# root
+#  ├── Dave@BotApp (Global User)
+#  └── BotApp (Policy/Folder)
+#       ├── myDemoApp (Host)
+#       └── secretVar (Variable)
+#
+#==============================================================================
+
 - !policy
   id: BotApp
   body:
-    # Define a human user, a non-human identity that represents an application, and a secret
-  - !user Dave
-  - !host myDemoApp
-  - !variable secretVar
-  - !permit
-    # Give permissions to the human user to update the secret and fetch the secret.
-    role: !user Dave
-    privileges: [read, update, execute]
-    resource: !variable secretVar
-  - !permit
-    # Give permissions to the non-human identity to fetch the secret.
-    role: !host myDemoApp
-    privileges: [read, execute]
-    resource: !variable secretVar
+    # GLOBAL IDENTITY: Created here but promoted to root level
+    # Final ID: user:Dave@BotApp
+    - !user Dave
+
+    # NESTED IDENTITY: Stays inside the BotApp folder
+    # Final ID: host:BotApp/myDemoApp
+    - !host myDemoApp
+
+    # NESTED RESOURCE: Stays inside the BotApp folder
+    # Final ID: variable:BotApp/secretVar
+    - !variable secretVar
+
+    # PERMISSIONS: Dave needs 'execute' to see the value, 'update' to change it
+    - !permit
+      role: !user Dave
+      privileges: [read, update, execute]
+      resource: !variable secretVar
+
+    # PERMISSIONS: App needs 'execute' to fetch the value via API
+    - !permit
+      role: !host myDemoApp
+      privileges: [read, execute]
+      resource: !variable secretVar
+
+#==============================================================================
+# END OF POLICY
+#==============================================================================
+#
+# TO VIEW THE ACTUAL LOADED POLICY STRUCTURE:
+# Run this command to see all resources created by this policy:
+#
+#   docker-compose exec client conjur list | jq -r '.[]' | awk -F: '{print $3 " (" $2 ")"}' | sed 's/\// │── /g' | sort
+#
+# This displays the resource hierarchy as it appears in Conjur after loading,
+# with resource types shown in parentheses (e.g., "myDemoApp (host)").
+#==============================================================================
