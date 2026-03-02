@@ -91,3 +91,22 @@ services:
     command: infinity
     volumes:
     - ./conf/policy:/policy
+
+  jwt-provider:
+    build:
+      context: ./jwt-provider
+      dockerfile: Dockerfile
+    container_name: jwt_provider
+    ports:
+      - "8000:8000"
+    restart: on-failure
+
+  jwt-client:
+    build:
+      context: .
+      dockerfile: jwt-client.Dockerfile
+    container_name: jwt_client
+    depends_on:
+      - jwt-provider
+      - proxy
+    restart: on-failure
